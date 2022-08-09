@@ -1,0 +1,12 @@
+# Files
+.env
+
+
+# Directories
+.venv/
+.vscode/
+.ipynb_checkpoints/
+__pycache__/
+artifacts/
+data/
+wandb/

@@ -25,8 +25,8 @@ class PolynomialDataset(Dataset):
         return self.X.shape[0]
 
     def __getitem__(self, index):
-        x = torch.tensor(self.X[index]).to(torch.float32).unsqueeze(-1)
-        y = torch.tensor(self.Y[index]).to(torch.float32).unsqueeze(-1)
+        x = torch.tensor(self.X[index]).to(torch.float).unsqueeze(-1)
+        y = torch.tensor(self.Y[index]).to(torch.float).unsqueeze(-1)
 
         return x, y
 

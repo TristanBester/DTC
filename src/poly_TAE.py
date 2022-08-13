@@ -64,7 +64,6 @@ def validate(model, criterion, data_loader, device):
 
 
 if __name__ == "__main__":
-    0 / 0
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--run_name", type=str, default="test")
@@ -105,6 +104,7 @@ if __name__ == "__main__":
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, factor=0.5, patience=5, threshold=0.01, verbose=True,
     )
+    model = model.to(device)
 
     tae_artifact = wandb.Artifact(f"TAE-{wandb.run.id}", type="model")
 

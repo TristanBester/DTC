@@ -14,7 +14,7 @@ class PolynomialDataset(Dataset):
             self.Y = np.load(f)
 
     def __len__(self):
-        return self.X.shape[0] / self.ba
+        return self.X.shape[0]
 
     def __getitem__(self, index):
         x = torch.tensor(self.X[index]).to(torch.float).unsqueeze(-1)

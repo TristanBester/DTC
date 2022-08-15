@@ -83,6 +83,7 @@ class EarlyStopping:
 def train_autoencoder_one_epoch(model, optimizer, criterion, data_loader, device):
     model.train()
     total_loss = 0
+    batch_counter = 0
 
     for x, _ in data_loader:
         x = x.to(device)
@@ -94,12 +95,14 @@ def train_autoencoder_one_epoch(model, optimizer, criterion, data_loader, device
         optimizer.step()
 
         total_loss += loss.item()
-    return total_loss / len(data_loader)
+        batch_counter += 1
+    return total_loss / batch_counter
 
 
 def evaluate_autoencoder(model, criterion, data_loader, device):
     model.eval()
     total_loss = 0
+    batch_counter = 0
 
     with torch.no_grad():
         for x, _ in data_loader:
@@ -108,7 +111,8 @@ def evaluate_autoencoder(model, criterion, data_loader, device):
             loss = criterion(outputs, x)
 
             total_loss += loss.item()
-    return total_loss / len(data_loader)
+            batch_counter += 1
+    return total_loss / batch_counter
 
 
 def init_centroids(encoder, data_loader, device, metric, n_clusters):
@@ -158,6 +162,7 @@ def train_dtc_one_epoch(
 
     ae_total_loss = 0
     cl_total_loss = 0
+    batch_counter = 0
 
     for x, _ in data_loader:
         x = x.to(device)
@@ -183,7 +188,11 @@ def train_dtc_one_epoch(
 
         ae_total_loss += ae_loss.item()
         cl_total_loss += cl_loss.item()
-    return ae_total_loss / len(data_loader), cl_total_loss / len(data_loader)
+        batch_counter += 1
+    return (
+        ae_total_loss / batch_counter,
+        cl_total_loss / batch_counter,
+    )
 
 
 def evaluate_dtc(

@@ -1,10 +1,14 @@
+import argparse
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.cluster import AgglomerativeClustering
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
 
+import wandb
 from datasets import PolynomialDataset
 from metrics.performance import accuracy
 from metrics.similarity import euclidean_distance
@@ -78,6 +82,11 @@ class EarlyStopping:
 
         self.patience_counter += 1
         return False
+
+
+def get_lr(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group["lr"]
 
 
 def train_autoencoder_one_epoch(model, optimizer, criterion, data_loader, device):
@@ -245,13 +254,33 @@ def evaluate_dtc(
 
 
 if __name__ == "__main__":
-    dataset = PolynomialDataset(
-        X_path="/Users/tristan/Documents/CS/Research/DTC/artifacts/polynomial_dataset_X:v0",
-        Y_path="/Users/tristan/Documents/CS/Research/DTC/artifacts/polynomial_dataset_Y:v0",
-    )
-    data_loader = DataLoader(dataset=dataset, batch_size=10, shuffle=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--run_name", type=str, default="test")
+    args = parser.parse_args()
 
-    device = torch.device("cpu")
+    wandb_run = wandb.init(project="DTC", name=args.run_name)
+
+    artifact_X = wandb_run.use_artifact(
+        "tristanbester1/DTC/polynomial_dataset_X:v0", type="dataset",
+    )
+    artifact_Y = wandb_run.use_artifact(
+        "tristanbester1/DTC/polynomial_dataset_Y:v0", type="dataset",
+    )
+
+    X_path = artifact_X.download()
+    Y_path = artifact_Y.download()
+
+    dataset = PolynomialDataset(X_path=X_path, Y_path=Y_path,)
+
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+    train_loader = DataLoader(dataset=train_dataset, batch_size=8)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=1)
+
+    device = torch.device(args.device)
 
     encoder = Encoder(**ENCODER_CONFIG)
     decoder = Decoder(**DECODER_CONFIG)
@@ -261,16 +290,26 @@ if __name__ == "__main__":
     stop = EarlyStopping(patience=1)
     val_loss = None
 
+    print("Autoencoder pretraining started.")
+
     while not stop(val_loss):
         train_loss = train_autoencoder_one_epoch(
-            autoencoder, ae_optimizer, ae_criterion, data_loader, device
+            autoencoder, ae_optimizer, ae_criterion, train_loader, device
         )
-        val_loss = evaluate_autoencoder(autoencoder, ae_criterion, data_loader, device)
-        print(val_loss)
+        val_loss = evaluate_autoencoder(autoencoder, ae_criterion, test_loader, device)
+        wandb.log(
+            {"AE_pretrain_train_loss": train_loss, "AE_pretrain_val_loss": val_loss,}
+        )
+
+    print("Autoencoder pretrainined completed.")
+
+    print("Initialising cluster centroids.")
 
     centroids = init_centroids(
-        autoencoder[0], data_loader, device, euclidean_distance, 3
+        autoencoder[0], train_loader, device, euclidean_distance, 3
     )
+
+    print("Cluster centroids initialised.")
 
     clustering_layer = ClusteringLayer(
         centroids=centroids, metric=euclidean_distance, alpha=1
@@ -278,9 +317,22 @@ if __name__ == "__main__":
     cl_criterion = nn.KLDivLoss(log_target=True, reduction="batchmean")
     cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.001)
 
-    print()
+    ae_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        ae_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,
+    )
+    cl_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        cl_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,
+    )
 
-    for i in range(1):
+    encoder_artifact = wandb.Artifact(f"encoder-{wandb.run.id}", type="model")
+    decoder_artifact = wandb.Artifact(f"decoder-{wandb.run.id}", type="model")
+    cluster_artifact = wandb.Artifact(f"CL-{wandb.run.id}", type="model")
+
+    lowest_cl_val_loss = float("inf")
+
+    print("DTC training started.")
+
+    for i in tqdm(range(1000)):
         ae_train_loss, cl_train_loss = train_dtc_one_epoch(
             encoder=encoder,
             decoder=decoder,
@@ -289,23 +341,49 @@ if __name__ == "__main__":
             cl_optimizer=cl_optimizer,
             ae_criterion=ae_criterion,
             cl_criterion=cl_criterion,
-            data_loader=data_loader,
+            data_loader=train_loader,
             device=device,
         )
 
-        # print(ae_train_loss, cl_train_loss)
-
-        ae_val_loss, cl_val_loss, acc = evaluate_dtc(
+        ae_val_loss, cl_val_loss, val_acc = evaluate_dtc(
             encoder=encoder,
             decoder=decoder,
             clustering=clustering_layer,
             ae_criterion=ae_criterion,
             cl_criterion=cl_criterion,
             perf_metric=accuracy,
-            data_loader=data_loader,
+            data_loader=test_loader,
             device=device,
         )
-        # print(ae_val_loss, cl_val_loss, acc)
-        # print()
-        print(acc)
+
+        ae_scheduler.step(ae_val_loss)
+        cl_scheduler.step(cl_val_loss)
+
+        wandb.log(
+            {
+                "DTC_AE_MSE_train_loss": ae_train_loss,
+                "DTC_CL_KLDiv_train_loss": cl_train_loss,
+                "DTC_AE_MSE_val_loss": ae_val_loss,
+                "DTC_ACL_KLDiv_val_loss": ae_val_loss,
+                "DTC_cluster_acc_val_loss": val_acc,
+                "DTC_AE_lr": get_lr(ae_optimizer),
+                "DTC_CL_lr": get_lr(cl_optimizer),
+            }
+        )
+
+        if cl_val_loss < lowest_cl_val_loss:
+            torch.save(encoder.state_dict(), f"./encoder.pt")
+            torch.save(decoder.state_dict(), f"./decoder.pt")
+            torch.save(clustering_layer.state_dict(), f"./CL.pt")
+            lowest_cl_val_loss = cl_val_loss
+
+    encoder_artifact.add_file("./encoder.pt", "model_encoder.pt")
+    decoder_artifact.add_file("./decoder.pt", "model_decoder.pt")
+    cluster_artifact.add_file("./CL.pt", "model_cluster.pt")
+
+    wandb.log_artifact(encoder_artifact, aliases=["latest", "best"])
+    wandb.log_artifact(decoder_artifact, aliases=["latest", "best"])
+    wandb.log_artifact(cluster_artifact, aliases=["latest", "best"])
+
+    print("DTC training complete.")
 

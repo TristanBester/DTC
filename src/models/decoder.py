@@ -47,8 +47,6 @@ class Decoder(nn.Module):
             (self.seq_len - self.cnn_kernel) / self.cnn_stride - self.mp_kernel + 1
         ) / self.mp_stride + 1
 
-        print(f"LHS: {lhs}\tRHS: {rhs}")
-
         if lhs != rhs:
             print(f"LHS: {lhs}\tRHS: {rhs}")
             raise ValueError(

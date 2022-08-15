@@ -162,6 +162,7 @@ def train_dtc_one_epoch(
     cl_optimizer,
     ae_criterion,
     cl_criterion,
+    perf_metric,
     data_loader,
     device,
 ):
@@ -171,10 +172,12 @@ def train_dtc_one_epoch(
 
     ae_total_loss = 0
     cl_total_loss = 0
+    perf_total_score = 0
     batch_counter = 0
 
-    for x, _ in data_loader:
+    for x, y in data_loader:
         x = x.to(device)
+        y = y.to(device).flatten()
 
         ae_optimizer.zero_grad()
         cl_optimizer.zero_grad()
@@ -197,10 +200,14 @@ def train_dtc_one_epoch(
 
         ae_total_loss += ae_loss.item()
         cl_total_loss += cl_loss.item()
+
+        cluster_preds = torch.argmax(Q, dim=1).flatten()
+        perf_total_score += perf_metric(cluster_preds, y)
         batch_counter += 1
     return (
         ae_total_loss / batch_counter,
         cl_total_loss / batch_counter,
+        perf_total_score / batch_counter,
     )
 
 
@@ -315,7 +322,7 @@ if __name__ == "__main__":
         centroids=centroids, metric=euclidean_distance, alpha=1
     )
     cl_criterion = nn.KLDivLoss(log_target=True, reduction="batchmean")
-    cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.1)
+    cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.01)
 
     ae_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         ae_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,
@@ -333,7 +340,7 @@ if __name__ == "__main__":
     print("DTC training started.")
 
     for i in tqdm(range(1000)):
-        ae_train_loss, cl_train_loss = train_dtc_one_epoch(
+        ae_train_loss, cl_train_loss, train_acc = train_dtc_one_epoch(
             encoder=encoder,
             decoder=decoder,
             clustering=clustering_layer,
@@ -363,9 +370,10 @@ if __name__ == "__main__":
             {
                 "DTC_AE_MSE_train_loss": ae_train_loss,
                 "DTC_CL_KLDiv_train_loss": cl_train_loss,
+                "DTC_cluster_acc_train": train_acc,
                 "DTC_AE_MSE_val_loss": ae_val_loss,
                 "DTC_ACL_KLDiv_val_loss": ae_val_loss,
-                "DTC_cluster_acc_val_loss": val_acc,
+                "DTC_cluster_acc_val": val_acc,
                 "DTC_AE_lr": get_lr(ae_optimizer),
                 "DTC_CL_lr": get_lr(cl_optimizer),
             }

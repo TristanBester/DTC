@@ -315,7 +315,7 @@ if __name__ == "__main__":
         centroids=centroids, metric=euclidean_distance, alpha=1
     )
     cl_criterion = nn.KLDivLoss(log_target=True, reduction="batchmean")
-    cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.001)
+    cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.1)
 
     ae_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         ae_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,

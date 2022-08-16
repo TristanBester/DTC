@@ -1,8 +1,10 @@
 import argparse
+import pickle
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.cluster import AgglomerativeClustering
 from torch.utils.data import DataLoader, random_split
@@ -11,7 +13,7 @@ from tqdm import tqdm
 import wandb
 from datasets import PolynomialDataset
 from metrics.performance import accuracy
-from metrics.similarity import euclidean_distance
+from metrics.similarity import complexity_invariant_similarity, euclidean_distance
 from models import ClusteringLayer, Decoder, Encoder
 
 # ENCODER_CONFIG = {
@@ -26,10 +28,10 @@ from models import ClusteringLayer, Decoder, Encoder
 
 # DECODER_CONFIG = {
 #     "seq_len": 100,
-#     "cnn_kernel": 14,
-#     "cnn_stride": 2,
-#     "mp_kernel": 5,
-#     "mp_stride": 2,
+#     "cnn_kernel": 10,
+#     "cnn_stride": 3,
+#     "mp_kernel": 10,
+#     "mp_stride": 3,
 #     "upsample_scale": 2,
 #     "input_dim": 1,
 #     "hidden_dim": 1,
@@ -158,11 +160,9 @@ def train_dtc_one_epoch(
     encoder,
     decoder,
     clustering,
-    ae_optimizer,
-    cl_optimizer,
+    optimizer,
     ae_criterion,
     cl_criterion,
-    perf_metric,
     data_loader,
     device,
 ):
@@ -172,15 +172,13 @@ def train_dtc_one_epoch(
 
     ae_total_loss = 0
     cl_total_loss = 0
-    perf_total_score = 0
     batch_counter = 0
 
     for x, y in data_loader:
         x = x.to(device)
         y = y.to(device).flatten()
 
-        ae_optimizer.zero_grad()
-        cl_optimizer.zero_grad()
+        optimizer.zero_grad()
 
         latent = encoder(x)
         x_prime = decoder(latent)
@@ -192,34 +190,24 @@ def train_dtc_one_epoch(
         ae_loss = ae_criterion(x, x_prime)
         cl_loss = cl_criterion(log_Q, log_P)
 
-        ae_loss.backward(retain_graph=True)
-        cl_loss.backward()
+        dtc_loss = ae_loss + cl_loss
 
-        ae_optimizer.step()
-        cl_optimizer.step()
+        dtc_loss.backward()
+
+        optimizer.step()
 
         ae_total_loss += ae_loss.item()
         cl_total_loss += cl_loss.item()
 
-        cluster_preds = torch.argmax(Q, dim=1).flatten()
-        perf_total_score += perf_metric(cluster_preds, y)
         batch_counter += 1
     return (
         ae_total_loss / batch_counter,
         cl_total_loss / batch_counter,
-        perf_total_score / batch_counter,
     )
 
 
 def evaluate_dtc(
-    encoder,
-    decoder,
-    clustering,
-    ae_criterion,
-    cl_criterion,
-    perf_metric,
-    data_loader,
-    device,
+    encoder, decoder, clustering, ae_criterion, cl_criterion, data_loader, device,
 ):
     encoder.eval()
     decoder.eval()
@@ -227,8 +215,12 @@ def evaluate_dtc(
 
     ae_total_loss = 0
     cl_total_loss = 0
-    perf_total_score = 0
     batch_counter = 0
+
+    labels = []
+    predictions = []
+    Qs = []
+    Ps = []
 
     with torch.no_grad():
         for x, y in data_loader:
@@ -250,14 +242,57 @@ def evaluate_dtc(
 
             cluster_preds = torch.argmax(Q, dim=1).flatten()
 
-            perf_total_score += perf_metric(cluster_preds, y)
+            predictions.append(cluster_preds)
+            labels.append(y)
+            Qs.append(Q)
+            Ps.append(P)
+
             batch_counter += 1
 
     return (
         ae_total_loss / batch_counter,
         cl_total_loss / batch_counter,
-        perf_total_score / batch_counter,
+        predictions,
+        labels,
+        Qs,
+        Ps,
     )
+
+
+def permute(preds, Qs, Ps, labels, option=None):
+    acc_orig = (preds == labels).to(torch.float).mean().item()
+
+    preds = (preds + 1) % 3
+    acc_one = (preds == labels).to(torch.float).mean().item()
+
+    preds = (preds + 1) % 3
+    acc_two = (preds == labels).to(torch.float).mean().item()
+
+    if option is None:
+        if np.argmax([acc_orig, acc_one, acc_two]) == 0:
+            # print("##### 1 #####")
+            return acc_orig, Qs, Ps, 0
+        elif np.argmax([acc_orig, acc_one, acc_two]) == 1:
+            # print("##### 2 #####")
+            Qs = torch.cat([Qs[:, 0], Qs[:, 2], Qs[:, 1],]).reshape(3, Qs.shape[0]).T
+            Ps = torch.cat([Ps[:, 0], Ps[:, 2], Ps[:, 1],]).reshape(3, Qs.shape[0]).T
+            return acc_one, Qs, Ps, 1
+        else:
+            # print("##### 3 #####")
+            Qs = torch.cat([Qs[:, 2], Qs[:, 1], Qs[:, 0],]).reshape(3, Qs.shape[0]).T
+            Ps = torch.cat([Ps[:, 2], Ps[:, 1], Ps[:, 0],]).reshape(3, Qs.shape[0]).T
+            return acc_two, Ps, Qs, 2
+    else:
+        if option == 0:
+            return acc_orig, Qs, Ps, 0
+        elif option == 1:
+            Qs = torch.cat([Qs[:, 0], Qs[:, 2], Qs[:, 1],]).reshape(3, Qs.shape[0]).T
+            Ps = torch.cat([Ps[:, 0], Ps[:, 2], Ps[:, 1],]).reshape(3, Qs.shape[0]).T
+            return acc_one, Qs, Ps, 1
+        else:
+            Qs = torch.cat([Qs[:, 2], Qs[:, 1], Qs[:, 0],]).reshape(3, Qs.shape[0]).T
+            Ps = torch.cat([Ps[:, 2], Ps[:, 1], Ps[:, 0],]).reshape(3, Qs.shape[0]).T
+            return acc_two, Ps, Qs, 2
 
 
 if __name__ == "__main__":
@@ -268,24 +303,28 @@ if __name__ == "__main__":
 
     wandb_run = wandb.init(project="DTC", name=args.run_name)
 
-    artifact_X = wandb_run.use_artifact(
-        "tristanbester1/DTC/polynomial_dataset_X:v0", type="dataset",
+    # artifact_X = wandb_run.use_artifact(
+    #     "tristanbester1/DTC/polynomial_dataset_X:v0", type="dataset",
+    # )
+    # artifact_Y = wandb_run.use_artifact(
+    #     "tristanbester1/DTC/polynomial_dataset_Y:v0", type="dataset",
+    # )
+
+    # X_path = artifact_X.download()
+    # Y_path = artifact_Y.download()
+
+    # dataset = PolynomialDataset(X_path=X_path, Y_path=Y_path,)
+    dataset = PolynomialDataset(
+        X_path="/Users/tristan/Documents/CS/Research/DTC/artifacts/polynomial_dataset_X:v0",
+        Y_path="/Users/tristan/Documents/CS/Research/DTC/artifacts/polynomial_dataset_Y:v0",
     )
-    artifact_Y = wandb_run.use_artifact(
-        "tristanbester1/DTC/polynomial_dataset_Y:v0", type="dataset",
-    )
 
-    X_path = artifact_X.download()
-    Y_path = artifact_Y.download()
+    # train_size = int(0.8 * len(dataset))
+    # test_size = len(dataset) - train_size
+    # train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    dataset = PolynomialDataset(X_path=X_path, Y_path=Y_path,)
-
-    train_size = int(0.8 * len(dataset))
-    test_size = len(dataset) - train_size
-    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-
-    train_loader = DataLoader(dataset=train_dataset, batch_size=8)
-    test_loader = DataLoader(dataset=test_dataset, batch_size=1)
+    train_loader = DataLoader(dataset=dataset, batch_size=300)
+    test_loader = DataLoader(dataset=dataset, batch_size=300)
 
     device = torch.device(args.device)
 
@@ -294,7 +333,7 @@ if __name__ == "__main__":
     autoencoder = nn.Sequential(encoder, decoder)
     ae_criterion = nn.MSELoss()
     ae_optimizer = optim.Adam(autoencoder.parameters(), lr=0.01)
-    stop = EarlyStopping(patience=1)
+    stop = EarlyStopping(patience=0)
     val_loss = None
 
     print("Autoencoder pretraining started.")
@@ -307,6 +346,7 @@ if __name__ == "__main__":
         wandb.log(
             {"AE_pretrain_train_loss": train_loss, "AE_pretrain_val_loss": val_loss,}
         )
+        print(val_loss)
 
     print("Autoencoder pretrainined completed.")
 
@@ -322,64 +362,95 @@ if __name__ == "__main__":
         centroids=centroids, metric=euclidean_distance, alpha=1
     )
     cl_criterion = nn.KLDivLoss(log_target=True, reduction="batchmean")
-    cl_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.01)
+    dtc_optimizer = optim.Adam(params=clustering_layer.parameters(), lr=0.01)
 
-    ae_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        ae_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,
-    )
-    cl_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        cl_optimizer, factor=0.5, patience=2, threshold=0.001, verbose=True,
+    dtc_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        dtc_optimizer, factor=0.5, patience=50, threshold=0.0001, verbose=True,
     )
 
     encoder_artifact = wandb.Artifact(f"encoder-{wandb.run.id}", type="model")
     decoder_artifact = wandb.Artifact(f"decoder-{wandb.run.id}", type="model")
     cluster_artifact = wandb.Artifact(f"CL-{wandb.run.id}", type="model")
 
-    lowest_cl_val_loss = float("inf")
+    lowest_loss = float("inf")
 
     print("DTC training started.")
+    option = None
 
-    for i in tqdm(range(1000)):
-        ae_train_loss, cl_train_loss, train_acc = train_dtc_one_epoch(
+    all_centroids = []
+    all_centroids.append(clustering_layer.centroids.detach().numpy().copy())
+
+    all_ae_preds = []
+
+    for i in range(1000):
+        ae_train_loss, cl_train_loss = train_dtc_one_epoch(
             encoder=encoder,
             decoder=decoder,
             clustering=clustering_layer,
-            ae_optimizer=ae_optimizer,
-            cl_optimizer=cl_optimizer,
+            optimizer=dtc_optimizer,
             ae_criterion=ae_criterion,
             cl_criterion=cl_criterion,
             data_loader=train_loader,
             device=device,
         )
 
-        ae_val_loss, cl_val_loss, val_acc = evaluate_dtc(
+        ae_val_loss, cl_val_loss, preds, labels, Qs, Ps = evaluate_dtc(
             encoder=encoder,
             decoder=decoder,
             clustering=clustering_layer,
             ae_criterion=ae_criterion,
             cl_criterion=cl_criterion,
-            perf_metric=accuracy,
             data_loader=test_loader,
             device=device,
         )
 
-        ae_scheduler.step(ae_val_loss)
-        cl_scheduler.step(cl_val_loss)
+        dtc_scheduler.step(ae_val_loss + cl_val_loss)
+
+        preds = torch.cat(preds)
+        Qs = torch.cat(Qs)
+        Ps = torch.cat(Ps)
+        labels = torch.cat(labels).to(torch.long)
+
+        preds, Qs, Ps, option = permute(preds, Qs, Ps, labels, None)
+
+        preds_Q = torch.argmax(Qs, dim=1).flatten()
+        preds_P = torch.argmax(Ps, dim=1).flatten()
+
+        acc_Q = (preds_Q == labels).to(torch.float).mean().item()
+        acc_P = (preds_P == labels).to(torch.float).mean().item()
+
+        print(acc_P)
+
+        l_Q = F.cross_entropy(Qs, labels).item()
+        l_P = F.cross_entropy(Ps, labels).item()
+
+        maxes_Q = Qs.max(dim=1).values.mean().item()
+        maxes_P = Ps.max(dim=1).values.mean().item()
 
         wandb.log(
             {
-                "DTC_AE_MSE_train_loss": ae_train_loss,
-                "DTC_CL_KLDiv_train_loss": cl_train_loss,
-                "DTC_cluster_acc_train": train_acc,
-                "DTC_AE_MSE_val_loss": ae_val_loss,
-                "DTC_ACL_KLDiv_val_loss": ae_val_loss,
-                "DTC_cluster_acc_val": val_acc,
-                "DTC_AE_lr": get_lr(ae_optimizer),
-                "DTC_CL_lr": get_lr(cl_optimizer),
+                "AE_loss": ae_val_loss,
+                "CL_loss": cl_val_loss,
+                "DTC_loss": ae_val_loss + cl_val_loss,
+                "ACC_Q": acc_Q,
+                "ACC_P": acc_P,
+                "Cross_Entropy_Q": l_Q,
+                "Cross_Entropy_P": l_P,
+                "Ave_Max_Proba_Q": maxes_Q,
+                "Ave_Max_Proba_P": maxes_P,
             }
         )
 
-        if cl_val_loss < lowest_cl_val_loss:
+        if i % 100 == 0:
+            all_centroids.append(clustering_layer.centroids.detach().numpy().copy())
+
+            for x, y in train_loader:
+                l = encoder(x)
+                all_ae_preds.append((l, y))
+
+        if ae_val_loss + cl_val_loss < lowest_loss:
+            print(f"Saving - {i}")
+            lowest_loss = ae_val_loss + cl_val_loss
             torch.save(encoder.state_dict(), f"./encoder.pt")
             torch.save(decoder.state_dict(), f"./decoder.pt")
             torch.save(clustering_layer.state_dict(), f"./CL.pt")
@@ -393,5 +464,17 @@ if __name__ == "__main__":
     wandb.log_artifact(decoder_artifact, aliases=["latest", "best"])
     wandb.log_artifact(cluster_artifact, aliases=["latest", "best"])
 
-    print("DTC training complete.")
+    with open("centroids.pkl", "wb") as f:
+        pickle.dump(all_centroids, f)
 
+    with open("preds.pkl", "wb") as f:
+        pickle.dump(all_ae_preds, f)
+
+    centroids_artifact = wandb.Artifact(f"centroids-{wandb.run.id}", type="audit-data")
+    ae_latent_artifact = wandb.Artifact(f"latent-{wandb.run.id}", type="audit-data")
+
+    centroids_artifact.add_file("./centroids.pkl", "centroids.pkl")
+    ae_latent_artifact.add_file("./preds.pkl", "latent.pkl")
+
+    wandb.log_artifact(centroids_artifact)
+    wandb.log_artifact(ae_latent_artifact)
